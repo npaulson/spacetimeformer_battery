@@ -1,3 +1,17 @@
+# Prognosis of Multivariate Battery State of Performance and Health via Transformers - Repository
+
+This repository contains all codes required to reproduce the results in the manuscript. To run the spacetimeformer model, first install the package as described in the installation instructions below. Then download both directories from the ([materials data facility entry](https://doi.org/10.18126/ckt2-g8j2)) and put them in the ./spacetimeformer_battery/spacetimeformer/data/ directory. Below is an example of how to run the model for the CAMP dataset:
+
+```
+>>> python train.py spacetimeformer battery_CAMP --run_name spatiotemporal_battery_CAMP --d_model 100 --d_ff 200 --enc_layers 4 --dec_layers 4 --gpus 0 --batch_size 4 --start_token_len 4 --n_heads 4 --context_points 1 --skip_context 1 --skip_target 10 --early_stopping --wandb --plot
+```
+
+In order, use python to call 'train.py' with the spacetimeformer model, battery_CAMP dataset, and the specified hyperparameters. Add or remove the last three entries to control other elements of the code behavior.
+
+Once a run has been performed and the results automatically uploaded to ([Weights and Biases](https://wandb.ai/site)), relevant data files can be downloaded to generate the figures used in the manuscript with the python scripts in the ./spacetimeformer_battery/scripts/ directory.
+
+Below is the original readme from late January 2022.
+
 # Spacetimeformer Multivariate Forecasting
 
 This repository contains the code for the paper, "**Long-Range Transformers for Dynamic Spatiotemporal Forecasting**", Grigsby, Wang and Qi, 2021. ([arXiv](https://arxiv.org/abs/2109.12218))
