@@ -20,6 +20,7 @@ class Time2Vec(nn.Module):
         if self.enabled:
             # size of x = [bs, sample, input_dim]
             x = torch.diag_embed(x)
+
             x_affine = torch.matmul(x, self.embed_weight) + self.embed_bias
             # size of x_affine = [bs, sample, embed_dim]
             x_affine_0, x_affine_remain = torch.split(

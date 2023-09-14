@@ -22,6 +22,9 @@ class DataModule(pl.LightningDataModule):
     def test_dataloader(self):
         return self._make_dloader("test")
 
+    def extrapolate_dataloader(self):
+        return self._make_dloader("extrapolate")
+
     def _make_dloader(self, split):
         return DataLoader(
             self.datasetCls(**self.dataset_kwargs, split=split),

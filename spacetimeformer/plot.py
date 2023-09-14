@@ -20,56 +20,99 @@ def _assert_squeeze(x):
     return x.squeeze(-1)
 
 
-def plot(x_c, y_c, x_t, y_t, preds, conf=None):
-    if y_c.shape[-1] > 1:
-        idx = random.randrange(0, y_c.shape[-1])
-    y_c = y_c[..., idx]
-    y_t = y_t[..., idx]
-    preds = preds[..., idx]
+def plot(x_c, y_c, x_t, y_t, preds,
+         conf=None, inv_scaler=None,
+         channel_labels=None, dset=None,
+         skip_context=1, skip_target=1):
 
-    fig, ax = plt.subplots(figsize=(7, 4))
-    xaxis_c = np.arange(len(y_c))
-    xaxis_t = np.arange(len(y_c), len(y_c) + len(y_t))
-    context = pd.DataFrame({"xaxis_c": xaxis_c, "y_c": y_c})
-    target = pd.DataFrame({"xaxis_t": xaxis_t, "y_t": y_t, "pred": preds})
-    sns.lineplot(data=context, x="xaxis_c", y="y_c", label="Context", linewidth=5.8)
-    ax.scatter(
-        x=target["xaxis_t"], y=target["y_t"], c="grey", label="True", linewidth=1.0
-    )
-    sns.lineplot(data=target, x="xaxis_t", y="pred", label="Forecast", linewidth=5.9)
-    if conf is not None:
-        conf = conf[..., idx]
-        ax.fill_between(
-            xaxis_t, (preds - conf), (preds + conf), color="orange", alpha=0.1
+    if 'battery' in dset:
+        nonzero = y_c[..., 0] != 0
+        y_c = y_c[nonzero, :]
+
+        nonzero = y_t[..., 0] != 0
+        y_t = y_t[nonzero, :]
+        preds = preds[nonzero, :]
+
+    if inv_scaler is not None:
+        y_c = inv_scaler(y_c)
+        y_t = inv_scaler(y_t)
+        preds = inv_scaler(preds)
+
+    imgs = []
+
+    for idx in range(y_c.shape[-1]):
+
+        y_c_i = y_c[..., idx]
+        y_t_i = y_t[..., idx]
+        preds_i = preds[..., idx]
+
+        fig, ax = plt.subplots(figsize=(7, 4))
+        xaxis_c = np.arange(0, skip_context*len(y_c_i), skip_context)
+        x_t_st = xaxis_c[-1] + skip_target
+        xaxis_t = np.arange(x_t_st, x_t_st + skip_target*len(y_t_i), skip_target)
+        context = pd.DataFrame({"xaxis_c": xaxis_c, "y_c": y_c_i})
+        target = pd.DataFrame({"xaxis_t": xaxis_t, "y_t": y_t_i, "pred": preds_i})
+        ax.scatter(
+            x=target["xaxis_t"], y=target["y_t"], c="grey", label="True",
+            marker='o', linewidth=1.0
         )
-    ax.legend(loc="upper left", prop={"size": 12})
-    ax.set_facecolor("#f0f0f0")
-    ax.set_xticks([])
-    ax.set_xlabel("")
-    ax.set_ylabel("")
+        ax.scatter(
+            x=target['xaxis_t'], y=target['pred'], c='red', label='Forecast',
+            marker='.', linewidth=1)
 
-    plt.title(f"MAPE = {mape(y_t, preds):.3f}")
+        ax.scatter(
+            x=context["xaxis_c"], y=context["y_c"], c="blue", label="Context",
+            marker='s')
 
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=128)
-    buf.seek(0)
-    img_arr = np.frombuffer(buf.getvalue(), dtype=np.uint8)
-    buf.close()
-    plt.close(fig)
-    img = cv2.imdecode(img_arr, 1)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    return img
+        ax.legend(prop={"size": 12})
+        ax.set_facecolor("#f0f0f0")
+
+        if dset == 'battery':
+            ax.set_xlabel("cycles")
+        else:
+            ax.set_xlabel("")
+
+        if channel_labels is not None:
+            ax.set_ylabel(channel_labels[idx])
+        else:
+            ax.set_ylabel("")
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=128)
+
+        buf.seek(0)
+        img_arr = np.frombuffer(buf.getvalue(), dtype=np.uint8)
+        buf.close()
+        plt.close(fig)
+        img = cv2.imdecode(img_arr, 1)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        imgs.append(img)
+
+    return imgs
 
 
 class PredictionPlotterCallback(pl.Callback):
-    def __init__(self, test_batches, total_samples=4, log_to_wandb=True):
+
+    def __init__(self, test_batches, total_samples=4,
+                 inv_scaler=None, channel_labels=None, dset=None,
+                 set_name=None, skip_context=1, skip_target=1):
         self.test_data = test_batches
         self.total_samples = total_samples
-        self.log_to_wandb = log_to_wandb
-        self.imgs = None
+        self.channel_labels = channel_labels
+        self.dset = dset
+        self.set_name = set_name
+        self.inv_scaler = inv_scaler
+        self.skip_context = skip_context
+        self.skip_target = skip_target
 
     def on_validation_end(self, trainer, model):
+
         idxs = [random.sample(range(self.test_data[0].shape[0]), k=self.total_samples)]
+
+        for ii in range(self.test_data[3].shape[0]):
+            tst = self.test_data[3][ii, ..., 0]
+
         x_c, y_c, x_t, y_t = [i[idxs].detach().to(model.device) for i in self.test_data]
         with torch.no_grad():
             preds, *_ = model(x_c, y_c, x_t, y_t, **model.eval_step_forward_kwargs)
@@ -78,31 +121,33 @@ class PredictionPlotterCallback(pl.Callback):
                 preds = preds.mean
             else:
                 preds_std = [None for _ in range(preds.shape[0])]
+        
+        i = random.randrange(0, preds.shape[0])
+        imgs_ = plot(
+            x_c[i].cpu().numpy(),
+            y_c[i].cpu().numpy(),
+            x_t[i].cpu().numpy(),
+            y_t[i].cpu().numpy(),
+            preds[i].cpu().numpy(),
+            conf=preds_std[i],
+            inv_scaler = self.inv_scaler,
+            channel_labels=self.channel_labels,
+            dset=self.dset,
+            skip_context=self.skip_context,
+            skip_target=self.skip_target
+        )
 
         imgs = []
-        for i in range(preds.shape[0]):
-            img = plot(
-                x_c[i].cpu().numpy(),
-                y_c[i].cpu().numpy(),
-                x_t[i].cpu().numpy(),
-                y_t[i].cpu().numpy(),
-                preds[i].cpu().numpy(),
-                conf=preds_std[i],
-            )
+        for img in imgs_:
             if img is not None:
-                if self.log_to_wandb:
-                    img = wandb.Image(img)
-                imgs.append(img)
+                imgs.append(wandb.Image(img, caption=''))
 
-        if self.log_to_wandb:
-            trainer.logger.experiment.log(
-                {
-                    "test/prediction_plots": imgs,
-                    "global_step": trainer.global_step,
-                }
-            )
-        else:
-            self.imgs = imgs
+        trainer.logger.experiment.log(
+            {
+                f"{self.set_name}/prediction_plots": imgs,
+                "global_step": trainer.global_step,
+            }
+        )
 
 
 def attn_plot(attn, title, tick_spacing=None):

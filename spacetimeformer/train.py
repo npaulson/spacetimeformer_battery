@@ -1,3 +1,5 @@
+import logging
+
 from argparse import ArgumentParser
 import random
 import sys
@@ -22,6 +24,8 @@ _DSETS = [
     "toy1",
     "toy2",
     "solar_energy",
+    "battery_severson",
+    "battery_CAMP",
 ]
 
 
@@ -46,9 +50,13 @@ def create_parser():
     elif dset == "metr-la" or dset == "pems-bay":
         stf.data.metr_la.METR_LA_Data.add_cli(parser)
         stf.data.DataModule.add_cli(parser)
-    else:
+    elif dset in ["asos", "exchange", "toy1", "toy2", "solar_energy"]:
         stf.data.CSVTimeSeries.add_cli(parser)
         stf.data.CSVTorchDset.add_cli(parser)
+        stf.data.DataModule.add_cli(parser)
+    else:
+        stf.data.CSVBatterySeries.add_cli(parser)
+        stf.data.CSVTorchDset_Battery.add_cli(parser)
         stf.data.DataModule.add_cli(parser)
 
     if model == "lstm":
@@ -65,7 +73,6 @@ def create_parser():
 
     stf.callbacks.TimeMaskedLossCallback.add_cli(parser)
 
-    parser.add_argument("--null_value", type=float, default=None)
     parser.add_argument("--early_stopping", action="store_true")
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--plot", action="store_true")
@@ -73,6 +80,7 @@ def create_parser():
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--run_name", type=str, required=True)
     parser.add_argument("--accumulate", type=int, default=1)
+    parser.add_argument("--auto_scale_batch_size", type=str)
     parser.add_argument(
         "--trials", type=int, default=1, help="How many consecutive trials to run"
     )
@@ -110,6 +118,12 @@ def create_model(config):
     elif config.dset == "toy2":
         x_dim = 6
         y_dim = 20
+    elif config.dset == "battery_severson":
+        x_dim = 4
+        y_dim = 23
+    elif config.dset == "battery_CAMP":
+        x_dim = 4
+        y_dim = 5
 
     assert x_dim is not None
     assert y_dim is not None
@@ -208,7 +222,6 @@ def create_model(config):
             linear_window=config.linear_window,
             class_loss_imp=config.class_loss_imp,
             time_emb_dim=config.time_emb_dim,
-            null_value=config.null_value,
         )
     elif config.model == "linear":
         forecaster = stf.linear_model.Linear_Forecaster(
@@ -225,6 +238,7 @@ def create_model(config):
 def create_dset(config):
     INV_SCALER = lambda x: x
     NULL_VAL = None
+    target_cols = None
 
     if config.dset == "metr-la" or config.dset == "pems-bay":
         if config.dset == "pems-bay":
@@ -264,6 +278,12 @@ def create_dset(config):
             if data_path == "auto":
                 data_path = "./data/solar_AL_converted.csv"
             target_cols = [str(i) for i in range(137)]
+        elif config.dset == "battery_severson":
+            if data_path == "auto":
+                data_path = "./data/cyclvldata_severson/"
+        elif config.dset == 'battery_CAMP':
+            if data_path == "auto":
+                data_path = "./data/cyclvldata_CAMP/"
         elif "toy" in config.dset:
             if data_path == "auto":
                 if config.dset == "toy1":
@@ -286,33 +306,63 @@ def create_dset(config):
                 "New Zealand",
                 "Singapore",
             ]
-        dset = stf.data.CSVTimeSeries(
-            data_path=data_path,
-            target_cols=target_cols,
-        )
-        DATA_MODULE = stf.data.DataModule(
-            datasetCls=stf.data.CSVTorchDset,
-            dataset_kwargs={
-                "csv_time_series": dset,
-                "context_points": config.context_points,
-                "target_points": config.target_points,
-                "time_resolution": config.time_resolution,
-            },
-            batch_size=config.batch_size,
-            workers=config.workers,
-        )
-        INV_SCALER = dset.reverse_scaling
-        NULL_VAL = None
 
-    return DATA_MODULE, INV_SCALER, NULL_VAL
+        if config.dset in ['battery_severson', 'battery_CAMP']:
+            dset = stf.data.CSVBatterySeries(
+                dset_name=config.dset,
+                data_path=data_path,
+                context_points=config.context_points,
+                stride=config.stride,
+                skip_context=config.skip_context,
+                skip_target=config.skip_target)
+
+            target_cols = dset.target_cols
+            datasetCls = stf.data.CSVTorchDset_Battery
+
+            DATA_MODULE = stf.data.DataModule(
+                datasetCls=datasetCls,
+                dataset_kwargs={
+                    "csv_battery_series": dset,
+                    "context_points": config.context_points,
+                },
+                batch_size=config.batch_size,
+                workers=config.workers,
+            )
+
+            INV_SCALER = dset.reverse_scaling
+            NULL_VAL = None
+
+        else:
+            dset = stf.data.CSVTimeSeries(
+                data_path=data_path,
+                target_cols=target_cols,
+            )
+            target_cols = dset.target_cols
+            datasetCls = stf.data.CSVTorchDset
+
+            DATA_MODULE = stf.data.DataModule(
+                datasetCls=datasetCls,
+                dataset_kwargs={
+                    "csv_time_series": dset,
+                    "context_points": config.context_points,
+                    "target_points": config.target_points,
+                    "time_resolution": config.time_resolution,
+                },
+                batch_size=config.batch_size,
+                workers=config.workers,
+            )
+            INV_SCALER = dset.reverse_scaling
+            NULL_VAL = None
+
+    return DATA_MODULE, INV_SCALER, NULL_VAL, target_cols
 
 
 def create_callbacks(config):
     saving = pl.callbacks.ModelCheckpoint(
-        dirpath=f"./data/stf_model_checkpoints/{config.run_name}_{''.join([str(random.randint(0,9)) for _ in range(9)])}",
+        dirpath=f"../../lcrc_data/stf_model_checkpoints" +
+            "/{config.run_name}_{''.join([str(random.randint(0,9)) for _ in range(9)])}",
         monitor="val/mse",
-        mode="min",
-        filename=f"{config.run_name}" + "{epoch:02d}-{val/mse:.2f}",
+        filename=f"{config.run_name}" + "{epoch:02d}-{val/loss:.2f}",
         save_top_k=1,
     )
     callbacks = [saving]
@@ -321,7 +371,7 @@ def create_callbacks(config):
         callbacks.append(
             pl.callbacks.early_stopping.EarlyStopping(
                 monitor="val/loss",
-                patience=5,
+                patience=8,
             )
         )
     if config.wandb:
@@ -354,10 +404,7 @@ def main(args):
         entity = os.getenv("STF_WANDB_ACCT")
         log_dir = os.getenv("STF_LOG_DIR")
         if log_dir is None:
-            log_dir = "./data/STF_LOG_DIR"
-            print(
-                "Using default wandb log dir path of ./data/STF_LOG_DIR. This can be adjusted with the environment variable `STF_LOG_DIR`"
-            )
+            log_dir = "../../lcrc_data/STF_LOG_DIR"
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
         assert (
@@ -374,62 +421,132 @@ def main(args):
         config = wandb.config
         wandb.run.name = args.run_name
         wandb.run.save()
-        logger = pl.loggers.WandbLogger(
-            experiment=experiment, save_dir="./data/stf_LOG_DIR"
-        )
-        logger.log_hyperparams(config)
-
-
-    # Dset
-    data_module, inv_scaler, null_val = create_dset(args)
+    else:
+        config = args
 
     # Model
-    args.null_value = null_val
-    forecaster = create_model(args)
+    forecaster = create_model(config)
+
+    # Dset
+    data_module, inv_scaler, null_val, target_cols = create_dset(config)
+
     forecaster.set_inv_scaler(inv_scaler)
-    forecaster.set_null_value(null_val)
 
     # Callbacks
-    callbacks = create_callbacks(args)
+    callbacks = create_callbacks(config)
+    train_samples = next(iter(data_module.train_dataloader()))
+    val_samples = next(iter(data_module.val_dataloader()))
     test_samples = next(iter(data_module.test_dataloader()))
+    if config.dset in ['battery_CAMP']:
+        extrapolate_samples = next(iter(data_module.extrapolate_dataloader()))
 
-    if args.wandb and args.plot:
+    loggercore = logging.getLogger('pytorch_lightning.core')
+
+    if config.wandb and config.plot:
         callbacks.append(
             stf.plot.PredictionPlotterCallback(
-                test_samples, total_samples=min(8, args.batch_size)
+                train_samples, total_samples=min(8, config.batch_size),
+                inv_scaler=inv_scaler, channel_labels=target_cols, dset=config.dset,
+                set_name='train', skip_context=config.skip_context,
+                skip_target=config.skip_target
             )
         )
-    if args.wandb and args.model == "spacetimeformer" and args.attn_plot:
+        callbacks.append(
+            stf.plot.PredictionPlotterCallback(
+                val_samples, total_samples=min(8, config.batch_size),
+                inv_scaler=inv_scaler, channel_labels=target_cols, dset=config.dset,
+                set_name='val', skip_context=config.skip_context,
+                skip_target=config.skip_target
+            )
+        )
+        callbacks.append(
+            stf.plot.PredictionPlotterCallback(
+                test_samples, total_samples=min(8, config.batch_size),
+                inv_scaler=inv_scaler, channel_labels=target_cols, dset=config.dset,
+                set_name='test', skip_context=config.skip_context,
+                skip_target=config.skip_target
+            )
+        )
+
+        if config.dset in ['battery_CAMP']:
+            callbacks.append(
+                stf.plot.PredictionPlotterCallback(
+                    extrapolate_samples, total_samples=min(8, config.batch_size),
+                    inv_scaler=inv_scaler, channel_labels=target_cols, dset=config.dset,
+                    set_name='extrapolate', skip_context=config.skip_context,
+                    skip_target=config.skip_target
+                )
+            )
+
+    if config.wandb:
+        callbacks.append(
+            stf.callbacks.TestOutputCallback(
+                data_module.test_dataloader(),
+                inv_scaler=inv_scaler, channel_labels=target_cols, dset=config.dset,
+                set_name='test', skip_context=config.skip_context,
+                skip_target=config.skip_target
+            )
+        )
+
+        if config.dset in ['battery_CAMP']:
+
+            callbacks.append(
+                stf.callbacks.TestOutputCallback(
+                    data_module.extrapolate_dataloader(),
+                    inv_scaler=inv_scaler, channel_labels=target_cols, dset=config.dset,
+                    set_name='extrapolate', skip_context=config.skip_context,
+                    skip_target=config.skip_target
+                )
+            )
+
+    if config.wandb and config.model == "spacetimeformer" and config.attn_plot:
 
         callbacks.append(
             stf.plot.AttentionMatrixCallback(
                 test_samples,
                 layer=0,
-                total_samples=min(16, args.batch_size),
+                total_samples=min(16, config.batch_size),
                 raw_data_dir=wandb.run.dir,
             )
         )
 
+    # Deal with missing entries in some datasets
+    if null_val is not None:
+        forecaster.set_null_value(null_val)
+
+    # Logging
+    if config.wandb:
+        logger = pl.loggers.WandbLogger(
+            experiment=experiment, save_dir="../../lcrc_data/stf_LOG_DIR"
+        )
+        logger.log_hyperparams(config)
+
     trainer = pl.Trainer(
-        gpus=args.gpus,
+        gpus=config.gpus,
         callbacks=callbacks,
         logger=logger if args.wandb else None,
         accelerator="dp",
         log_gpu_memory=True,
-        gradient_clip_val=args.grad_clip_norm,
+        gradient_clip_val=config.grad_clip_norm,
         gradient_clip_algorithm="norm",
-        overfit_batches=20 if args.debug else 0,
-        #track_grad_norm=2,
+        overfit_batches=20 if config.debug else 0,
         accumulate_grad_batches=args.accumulate,
+        auto_scale_batch_size=args.auto_scale_batch_size,
         sync_batchnorm=True,
         val_check_interval=0.25 if args.dset == "asos" else 1.0,
     )
 
+    loggercore.error('before train')
+
     # Train
     trainer.fit(forecaster, datamodule=data_module)
 
-    # Test
-    trainer.test(datamodule=data_module, ckpt_path="best")
+    loggercore.error('after training')
+
+    # Test and Extrapolate
+    trainer.test(
+        datamodule=data_module,
+        ckpt_path="best")
 
     if args.wandb:
         experiment.finish()
@@ -439,6 +556,11 @@ if __name__ == "__main__":
     # CLI
     parser = create_parser()
     args = parser.parse_args()
+
+    loggercore = logging.getLogger('pytorch_lightning.core')
+    loggercore.setLevel('ERROR')
+    loggercore.addHandler(logging.FileHandler('core.log'))
+    loggercore.error('test')
 
     for trial in range(args.trials):
         main(args)

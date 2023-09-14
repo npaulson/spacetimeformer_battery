@@ -1,3 +1,5 @@
+import logging
+
 from abc import ABC, abstractmethod
 from typing import Tuple
 
@@ -5,7 +7,6 @@ import torch
 import torch.nn.functional as F
 import pytorch_lightning as pl
 from torch.distributions import Normal
-import numpy as np
 
 import spacetimeformer as stf
 
@@ -29,6 +30,9 @@ class Forecaster(pl.LightningModule, ABC):
             self.linear_model = stf.linear_model.LinearModel(linear_window)
         else:
             self.linear_model = lambda x: 0.0
+
+        loggercore = logging.getLogger('pytorch_lightning.core')
+        self.loggercore = loggercore
 
     def set_null_value(self, val: float) -> None:
         self.null_value = val
@@ -93,6 +97,9 @@ class Forecaster(pl.LightningModule, ABC):
         loss, mask = self.forecasting_loss(
             outputs=outputs, y_t=y_t, time_mask=time_mask
         )
+
+        self.loggercore.error('loss: %s', loss)
+
         return loss, outputs, mask
 
     @abstractmethod
@@ -162,10 +169,7 @@ class Forecaster(pl.LightningModule, ABC):
 
     def _log_stats(self, section, outs):
         for key in outs.keys():
-            stat = outs[key]
-            if isinstance(stat, np.ndarray) or isinstance(stat, torch.Tensor):
-                stat = stat.mean()
-            self.log(f"{section}/{key}", stat, sync_dist=True)
+            self.log(f"{section}/{key}", outs[key], sync_dist=True)
 
     def training_step_end(self, outs):
         self._log_stats("train", outs)
